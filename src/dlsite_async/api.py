@@ -1,13 +1,17 @@
 """DLsite API classes."""
 
+import secrets
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import replace
 from datetime import datetime
+from http.cookies import SimpleCookie
 from netrc import netrc
+from pathlib import Path
 from typing import Any, TypeVar
 
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp.client import _RequestContextManager
+from yarl import URL
 
 from ._scraper import parse_circle_html, parse_login_token, parse_work_html
 from .circle import Circle
@@ -60,11 +64,46 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
         """Perform post request."""
         return self.session.post(*args, **kwargs)
 
+    def load_cookies_txt(self, path: str | Path) -> None:
+        """Load cookies from a Netscape-format cookies.txt file.
+
+        Some login flows (e.g. DLsite's ``aix`` floor) sit behind
+        bot-detection that a plain HTTP client cannot pass, even once the
+        request logic matches a real browser exactly. In that case, log in
+        once using a real browser and export its cookies for the target
+        domain(s) with a browser extension (e.g. "Get cookies.txt LOCALLY"),
+        then load that export here before making any requests.
+
+        Args:
+            path: Path to a Netscape-format cookies.txt file.
+        """
+        by_domain: dict[str, SimpleCookie] = {}
+        with open(path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.split("\t")
+                if len(fields) != 7:
+                    continue
+                domain, _flag, cookie_path, secure, _expiration, name, value = fields
+                cookie = by_domain.setdefault(domain.lstrip("."), SimpleCookie())
+                cookie[name] = value
+                cookie[name]["domain"] = domain
+                cookie[name]["path"] = cookie_path
+                if secure == "TRUE":
+                    cookie[name]["secure"] = True
+        for domain, cookie in by_domain.items():
+            self.session.cookie_jar.update_cookies(
+                cookie, response_url=URL(f"https://{domain}/")
+            )
+
     async def login(
         self,
         login_id: str | None = None,
         password: str | None = None,
         netrc_host: str = "dlsite.com",
+        site_id: str = "maniax",
     ) -> None:
         """Login to DLsite.
 
@@ -73,6 +112,12 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
             password: DLsite password.
             netrc_host: Optional .netrc host. If `login_id` or `password` are
                 not set, they will be read from the specfied .netrc entry.
+            site_id: DLsite floor to complete the SSO handoff for (e.g.
+                ``"maniax"`` or ``"aix"``). Authenticating against
+                ``login.dlsite.com`` alone only sets cookies on that domain;
+                without this follow-up step ``www.dlsite.com`` (where product
+                pages actually live) never sees a valid session and content
+                gated behind login (such as the ``aix`` floor) stays hidden.
 
         Raises:
             AuthenticationError: Login failed.
@@ -89,8 +134,23 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
                 pass
         if not login_id or not password:
             raise AuthenticationError("DLsite login_id and password are required.")
+        # Visiting the OAuth2 authorize endpoint first (while unauthenticated)
+        # establishes the pending authorization request that the login form
+        # is bound to. Logging in without this step only authenticates the
+        # login.dlsite.com SSO session; the credential POST then has no
+        # pending OAuth request to complete and never hands a session back to
+        # www.dlsite.com (where product pages, including gated floors like
+        # aix, are actually served from).
         url = "https://login.dlsite.com/login"
-        async with self.get(url, params={"user": "self"}) as response:
+        oauth_url = "https://login.dlsite.com/oauth2/auth"
+        oauth_params = {
+            "client_id": "dlsite.user",
+            "redirect_uri": f"https://www.dlsite.com/{site_id}/login",
+            "cancel_uri": f"https://www.dlsite.com/{site_id}/",
+            "response_type": "code",
+            "state": secrets.token_hex(16),
+        }
+        async with self.get(oauth_url, params=oauth_params) as response:
             content = await response.text()
             token = parse_login_token(content)
         payload = {
@@ -99,9 +159,17 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
             "password": password,
         }
         async with self.post(url, data=payload) as response:
-            if "ログイン中です" not in await response.text():
+            if response.url.host != "www.dlsite.com":
                 raise AuthenticationError("DLsite login failed.")
         self._authed = True
+
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
 
 
 class DlsiteAPI(BaseAPI["DlsiteAPI"]):
@@ -109,10 +177,14 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
 
     Args:
         locale: Optional locale. Defaults to ``ja_JP``.
+        kwargs: Keyword args to pass into aiohttp.ClientSession (e.g.
+            ``connector`` to route requests through a proxy).
     """
 
     def __init__(self, locale: str | None = None, **kwargs: Any):
-        super().__init__(cookies={"adultchecked": "1"})
+        headers = {**_DEFAULT_HEADERS, **kwargs.pop("headers", {})}
+        cookies = {"adultchecked": "1", **kwargs.pop("cookies", {})}
+        super().__init__(cookies=cookies, headers=headers, **kwargs)
         self.locale = locale
 
     @property
