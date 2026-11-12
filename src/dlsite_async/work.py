@@ -2,9 +2,12 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum, IntEnum
-from typing import Any
+from typing import Any, Self
+
+
+_JSONLanguageEdition = list[dict[str, Any]] | dict[str, dict[str, Any]] | None
 
 
 class AgeCategory(IntEnum):
@@ -55,8 +58,91 @@ class WorkType(str, Enum):
     WEBTOON = "WBT"
 
 
+class WorkOption(str, Enum):
+    """Work options."""
+
+    AI_GENERATED = "AIG"
+    AI_PARTIAL = "AIP"
+    APK_FILE = "WAP"
+    BROWSER_COMPATIBLE = "DLP"
+    BULGARIAN = "BUL"
+    CHINESE_SIMPLIFIED = "CHI_HANS"
+    CHINESE_TRADITIONAL = "CHI_HANT"
+    CZECH = "CZE"
+    DANISH = "DAN"
+    DUTCH = "DUT"
+    ENGLISH = "ENG"
+    ESTONIAN = "EST"
+    EVENT = "EVT"
+    FINNISH = "FIN"
+    FRENCH = "FRE"
+    GERMAN = "GER"
+    GREEK = "GRE"
+    GROTESQUE = "GRO"
+    HOMOSEXUALITY = "MEN"
+    HUNGARIAN = "HUN"
+    ICELANDIC = "ICE"
+    INDONESIAN = "IND"
+    ITALIAN = "ITA"
+    JAPANESE = "JPN"
+    KOREAN = "KO_KR"
+    LATVIAN = "LAV"
+    MUSIC = "MS2"
+    PDF_FILE = "WPD"
+    POLISH = "POL"
+    PORTUGUESE = "POR"
+    RECOMMENDED_TRANSLATION = "VET"
+    REVIEWS = "REV"
+    ROMANIAN = "RUM"
+    RUSSIAN = "RUS"
+    SAVE_BACKUP = "SBK"
+    SLOVAK = "SLO"
+    SLOVENIAN = "SLV"
+    SPANISH = "SPA"
+    SWEDISH = "SWE"
+    THAI = "THA"
+    TRIAL_VERSION = "TRI"
+    UKRANIAN = "UKR"
+    VIDEO = "MV2"
+    VIETNAMESE = "VIE"
+    VOICE = "SND"
+
+
 @dataclass
-class Work:
+class _Serializable:
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Self:
+        """Construct Work from a dictionary."""
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in names})
+
+
+@dataclass
+class LanguageEdition(_Serializable):
+    """DLsite work language edition info."""
+
+    workno: str
+    edition_id: int
+    lang: str
+    edition_type: str | None = None
+    label: str | None = None
+    display_order: int | None = None
+
+
+@dataclass
+class TranslationInfo(_Serializable):
+    """DLsite work translation info."""
+
+    is_original: bool | None = None
+    is_volunteer: bool | None = None
+    original_workno: str | None = None
+    parent_workno: str | None = None
+    child_worknos: list[str] | None = None
+    lang: str | None = None
+
+
+@dataclass
+class Work(_Serializable):
     """DLsite work (product) class."""
 
     product_id: str
@@ -64,15 +150,14 @@ class Work:
     maker_id: str
     work_name: str
     age_category: AgeCategory
-    circle: str | None = None
-    brand: str | None = None
-    publisher: str | None = None
+    maker_name: str | None = None
     work_image: str | None = None
     regist_date: datetime | None = None
     work_type: WorkType | None = None
     book_type: BookType | None = None
     announce_date: datetime | None = None
-    modified_date: datetime | None = None
+    update_date: datetime | None = None
+    creater: list[str] | None = None
     scenario: list[str] | None = None
     illustration: list[str] | None = None
     voice_actor: list[str] | None = None
@@ -80,23 +165,219 @@ class Work:
     music: list[str] | None = None
     writer: list[str] | None = None
     genre: list[str] | None = None
-    label: str | None = None
+    label_name: str | None = None
     event: list[str] | None = None
-    file_format: list[str] | None = None
+    file_format_legacy: list[str] | None = None
+    file_type: str | None = None
+    file_type_string: str | None = None
+    file_type_special: str | None = None
+    contents_file_size: int | None = None
     file_size: str | None = None
     language: list[str] | None = None
     page_count: int | None = None
-    description: str | None = None
     sample_images: list[str] | None = None
     work_name_masked: str | None = None
     title_name: str | None = None
     title_name_masked: str | None = None
+    options: list[WorkOption] | None = None
+    intro: str | None = None
+    intro_masked: str | None = None
+    intro_s: str | None = None
+    rate_count_detail: dict[int, int] | None = None
+    translation_info: TranslationInfo | None = None
+    language_editions: list[LanguageEdition] | None = None
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> "Work":
-        """Construct Work from a dictionary."""
-        names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in names})
+    def from_json(
+        cls, d: Mapping[str, Any], announce: bool = False, locale: str | None = None
+    ) -> Self:
+        """Construct Work from DLsite API product info JSON."""
+        info = dict(d)
+        info["age_category"] = AgeCategory(info["age_category"])
+        info["work_type"] = WorkType(info["work_type"])
+        is_en = locale and locale.lower().startswith("en_")
+        if info.get("book_type"):
+            info["book_type"] = BookType(info["book_type"]["value"])
+        if is_en and info.get("maker_name_en"):
+            info["maker_name"] = info.get("maker_name_en")
+        if announce:
+            if info.get("regist_date"):
+                info["announce_date"] = cls._datetime_from_timestamp(
+                    info["regist_date"]
+                )
+        else:
+            for k in ("regist_date", "update_date"):
+                if info.get(k):
+                    info[k] = cls._datetime_from_timestamp(info[k])
+        if info.get("options"):
+            options = []
+            for option in info.get("options", "").split("#"):
+                try:
+                    options.append(WorkOption(option))
+                except ValueError:
+                    pass
+            info["options"] = options
+        cls._update_creaters_from_json(info)
+        genres = info.get("genres_replaced") or info.get("genre")
+        info.pop("genre", None)
+        if genres:
+            info["genre"] = [genre.get("name") for genre in genres if genre.get("name")]
+        lang_editions: _JSONLanguageEdition = info.pop("language_editions", None)
+        if lang_editions is not None:
+            lang_strings: list[str] = []
+            if isinstance(lang_editions, dict):
+                edition_it = (
+                    LanguageEdition.from_dict(v) for v in lang_editions.values()
+                )
+            else:
+                edition_it = (LanguageEdition.from_dict(e) for e in lang_editions)
+            editions = sorted(
+                edition_it, key=lambda x: (x.display_order is None, x.display_order)
+            )
+            if editions:
+                info["language_editions"] = editions
+                lang_strings = [edition.label for edition in editions if edition.label]
+                if lang_strings:
+                    info["language"] = lang_strings
+        pages = info.get("pages") or info.get("page_number")
+        if pages is not None:
+            try:
+                info["page_count"] = int(pages)
+            except ValueError:
+                pass
+        name_field = "name_en" if is_en else "name"
+        work_options = info.get("work_options")
+        if work_options:
+            events = [
+                v.get(name_field)
+                for _, v in work_options.items()
+                if v.get("category_id") == "9" and v.get(name_field)
+            ]
+            if events:
+                info["event"] = events
+        image_main = info.get("image_main", {}).get("url")
+        if image_main:
+            info["work_image"] = image_main
+        samples = info.get("image_samples", [])
+        if samples:
+            info["sample_images"] = [
+                image.get("url") for image in samples if image.get("url")
+            ]
+        info.pop("file_size", None)
+        contents = info.get("contents", [])
+        if contents:
+            for content in contents:
+                size = content.get("file_size_unit")
+                info["file_size"] = size
+                break
+        rate_count: dict[str, int] | list[dict[str, Any]] | None = info.pop(
+            "rate_count_detail", None
+        )
+        if isinstance(rate_count, list):
+            # product/info/ajax returns [{"review_point": n, "count": c, ...}]
+            # while product.json returns {"n": c}
+            rate_count = {
+                str(entry["review_point"]): entry["count"]
+                for entry in rate_count
+                if "review_point" in entry and "count" in entry
+            }
+        if rate_count:
+            info["rate_count_detail"] = {}
+            for k, v in rate_count.items():
+                try:
+                    info["rate_count_detail"][int(k)] = v
+                except ValueError:
+                    pass
+        translation_info = info.pop("translation_info", None)
+        if translation_info:
+            info["translation_info"] = TranslationInfo.from_dict(translation_info)
+        return cls.from_dict(info)
+
+    @staticmethod
+    def _datetime_from_timestamp(timestamp: str) -> datetime:
+        dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone(timedelta(hours=9)))
+
+    @staticmethod
+    def _update_creaters_from_json(info: dict[str, Any]) -> None:
+        creaters = info.get("creaters", {})
+        if creaters:
+            for f, k in [
+                ("creater", "created"),
+                ("illustration", "illust"),
+                ("music", "music"),
+                ("scenario", "scenario"),
+                ("voice_actor", "voice"),
+            ]:
+                values = [
+                    entry.get("name")
+                    for entry in creaters.get(f"{k}_by", [])
+                    if entry.get("name")
+                ]
+                if values:
+                    info[f] = values
+        # in API authors is only set for commercial books, creaters is only set
+        # for doujin books, web UI displays author for both
+        authors = info.pop("author", None) or info.get("authors")
+        if authors:
+            values = [
+                author.get("author_name")
+                for author in authors
+                if author.get("author_name")
+            ]
+            if values:
+                info["author"] = values
+        if (
+            info["work_type"]
+            in {WorkType.CG_ILLUSTRATIONS, WorkType.MANGA, WorkType.NOVEL}
+            and not authors
+            and info.get("creater")
+        ):
+            info["author"] = info["creater"]
+
+    @property
+    def circle(self) -> str | None:
+        if self.maker_id[:2] == "RG":
+            return self.maker_name
+        return None
+
+    @property
+    def brand(self) -> str | None:
+        if self.maker_id[:2] == "VG":
+            return self.maker_name
+        return None
+
+    @property
+    def publisher(self) -> str | None:
+        if self.maker_id[:2] == "BG":
+            return self.maker_name
+        return None
+
+    @property
+    def description(self) -> str | None:
+        """Work description."""
+        return self.intro_masked or self.intro_s or self.intro
+
+    @property
+    def file_format(self) -> list[str]:
+        """File formats."""
+        if self.file_format_legacy:
+            return self.file_format_legacy
+        formats: list[str] = []
+        file_type = self.file_type_string or self.file_type
+        if file_type:
+            formats.append(file_type)
+        if self.file_type_special:
+            formats.append(self.file_type_special)
+        return formats
+
+    @property
+    def label(self) -> str | None:
+        return self.label_name
+
+    @property
+    def modified_date(self) -> datetime | None:
+        return self.update_date
 
     @property
     def release_date(self) -> datetime | None:
@@ -105,10 +386,16 @@ class Work:
 
     @property
     def series(self) -> str | None:
-        """Series name.
+        """Series name."""
+        return self.title_name_masked or self.title_name
 
-        Set for backwards compatibility.
-        """
-        if self.title_name_masked is not None:
-            return self.title_name_masked
-        return self.title_name
+    @property
+    def rate_average(self) -> float | None:
+        if not self.rate_count_detail:
+            return None
+        rating = 0
+        total = 0
+        for k, v in self.rate_count_detail.items():
+            rating += k * v
+            total += v
+        return rating / total

@@ -3,48 +3,37 @@
 import secrets
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import replace
-from datetime import datetime
-from http.cookies import SimpleCookie
 from netrc import netrc
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
-from aiohttp import ClientSession, ClientTimeout
-from aiohttp.client import _RequestContextManager
-from yarl import URL
+from curl_cffi import AsyncSession, CurlError, Response
 
 from ._scraper import parse_circle_html, parse_login_token, parse_work_html
 from .circle import Circle
 from .exceptions import AuthenticationError, DlsiteError
-from .work import AgeCategory, BookType, Work, WorkType
+from .work import Work
 
 
 _T = TypeVar("_T")
-
-
-def _datetime_from_timestamp(timestamp: str) -> datetime:
-    return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
 
 
 class BaseAPI(AbstractAsyncContextManager["_T"]):
     """Base DLsite API session.
 
     Args:
-        kwargs: Keyword args to pass into aiohttp.ClientSession.
+        kwargs: Keyword args to pass into curl_cffi.AsyncSession.
     """
 
     _DL_CHUNK_SIZE = 1024 * 1024
-    _DL_TIMEOUT = ClientTimeout(
-        total=None,
-        connect=300,
-        sock_connect=None,
-        sock_read=None,
-    )
+    _DL_TIMEOUT = None
 
     def __init__(self, **kwargs: Any):
         self._exit_stack = AsyncExitStack()
         kwargs["raise_for_status"] = True
-        self.session = ClientSession(**kwargs)
+        kwargs["impersonate"] = "chrome"
+        self.session: AsyncSession = AsyncSession(**kwargs)
         self._exit_stack.push_async_exit(self.session)
         self._authed = False
 
@@ -56,13 +45,13 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
         async with self._exit_stack:
             pass
 
-    def get(self, *args: Any, **kwargs: Any) -> _RequestContextManager:
+    async def get(self, *args: Any, **kwargs: Any) -> Response:
         """Perform get request."""
-        return self.session.get(*args, **kwargs)
+        return await self.session.get(*args, **kwargs)
 
-    def post(self, *args: Any, **kwargs: Any) -> _RequestContextManager:
+    async def post(self, *args: Any, **kwargs: Any) -> Response:
         """Perform post request."""
-        return self.session.post(*args, **kwargs)
+        return await self.session.post(*args, **kwargs)
 
     def load_cookies_txt(self, path: str | Path) -> None:
         """Load cookies from a Netscape-format cookies.txt file.
@@ -77,7 +66,6 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
         Args:
             path: Path to a Netscape-format cookies.txt file.
         """
-        by_domain: dict[str, SimpleCookie] = {}
         with open(path, encoding="utf-8") as f:
             for raw_line in f:
                 line = raw_line.strip()
@@ -87,16 +75,13 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
                 if len(fields) != 7:
                     continue
                 domain, _flag, cookie_path, secure, _expiration, name, value = fields
-                cookie = by_domain.setdefault(domain.lstrip("."), SimpleCookie())
-                cookie[name] = value
-                cookie[name]["domain"] = domain
-                cookie[name]["path"] = cookie_path
-                if secure == "TRUE":
-                    cookie[name]["secure"] = True
-        for domain, cookie in by_domain.items():
-            self.session.cookie_jar.update_cookies(
-                cookie, response_url=URL(f"https://{domain}/")
-            )
+                self.session.cookies.set(
+                    name,
+                    value,
+                    domain=domain,
+                    path=cookie_path,
+                    secure=secure == "TRUE",
+                )
 
     async def login(
         self,
@@ -150,26 +135,17 @@ class BaseAPI(AbstractAsyncContextManager["_T"]):
             "response_type": "code",
             "state": secrets.token_hex(16),
         }
-        async with self.get(oauth_url, params=oauth_params) as response:
-            content = await response.text()
-            token = parse_login_token(content)
+        response = await self.get(oauth_url, params=oauth_params)
+        token = parse_login_token(response.text)
         payload = {
             "_token": token,
             "login_id": login_id,
             "password": password,
         }
-        async with self.post(url, data=payload) as response:
-            if response.url.host != "www.dlsite.com":
-                raise AuthenticationError("DLsite login failed.")
+        response = await self.post(url, data=payload)
+        if urlparse(response.url).hostname != "www.dlsite.com":
+            raise AuthenticationError("DLsite login failed.")
         self._authed = True
-
-
-_DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
 
 
 class DlsiteAPI(BaseAPI["DlsiteAPI"]):
@@ -177,27 +153,26 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
 
     Args:
         locale: Optional locale. Defaults to ``ja_JP``.
-        kwargs: Keyword args to pass into aiohttp.ClientSession (e.g.
-            ``connector`` to route requests through a proxy).
+        kwargs: Keyword args to pass into curl_cffi.AsyncSession (e.g.
+            ``proxy`` to route requests through a proxy).
     """
 
     def __init__(self, locale: str | None = None, **kwargs: Any):
-        headers = {**_DEFAULT_HEADERS, **kwargs.pop("headers", {})}
         cookies = {"adultchecked": "1", **kwargs.pop("cookies", {})}
-        super().__init__(cookies=cookies, headers=headers, **kwargs)
+        super().__init__(cookies=cookies, **kwargs)
         self.locale = locale
 
     @property
     def _common_params(self) -> dict[str, str]:
         return {"locale": self.locale} if self.locale else {}
 
-    def get(self, *args: Any, **kwargs: Any) -> _RequestContextManager:
+    async def get(self, *args: Any, **kwargs: Any) -> Response:
         """Perform get request."""
         if "params" in kwargs:
             kwargs["params"].update(self._common_params)
         else:
             kwargs["params"] = self._common_params
-        return super().get(*args, **kwargs)
+        return await super().get(*args, **kwargs)
 
     async def get_work(self, product_id: str) -> Work:
         """Return the specified work.
@@ -208,8 +183,44 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
         Returns:
             Complete work information.
         """
+        try:
+            works = await self.product(workno=product_id)
+            if not works:
+                works = await self.product(workno=product_id, announce=True)
+            if works:
+                return works[0]
+        except DlsiteError:
+            pass
         work = await self.product_info(product_id)
         return await self._fill_work_details(work)
+
+    async def product(self, *, announce: bool = False, **query: Any) -> list[Work]:
+        """Return embed/widget API product info.
+
+        Args:
+            announce: Force treating work as announced. Intended for internal
+                use only.
+            query: Product API query parameters. ``callback`` is unsupported
+                and will be ignored.
+
+        Returns:
+            Product information.
+
+        Raises:
+            DlsiteError: Failed to get product info.
+        """
+        url = "https://www.dlsite.com/maniax/api/=/product.json"
+        query.pop("callback", None)
+        if announce:
+            query["is_ana"] = 1
+        try:
+            response = await self.get(url, params=query)
+            data = response.json()
+        except CurlError as e:
+            raise DlsiteError(f"Failed to get product info for query: {query}") from e
+        if data is None:
+            raise DlsiteError(f"Failed to get product info for query: {query}")
+        return [Work.from_json(d, announce=announce) for d in data]
 
     async def product_info(self, product_id: str) -> Work:
         """Return ajax API product info.
@@ -225,19 +236,16 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
         """
         url = "https://www.dlsite.com/maniax/product/info/ajax"
         params = {"product_id": product_id}
-        async with self.get(url, params=params) as response:
-            data = await response.json()
+        try:
+            response = await self.get(url, params=params)
+            data = response.json()
+        except CurlError as e:
+            raise DlsiteError(f"Failed to get product info for {product_id}") from e
         if not data or product_id not in data:
             raise DlsiteError(f"Failed to get product info for {product_id}")
         info = data[product_id]
         info["product_id"] = product_id
-        info["age_category"] = AgeCategory(info["age_category"])
-        info["work_type"] = WorkType(info["work_type"])
-        if info.get("book_type"):
-            info["book_type"] = BookType(info["book_type"]["value"])
-        if info.get("regist_date"):
-            info["regist_date"] = _datetime_from_timestamp(info["regist_date"])
-        return Work.from_dict(info)
+        return Work.from_json(info)
 
     async def _fill_work_details(self, work: Work) -> Work:
         html = await self._fetch_work_html(work)
@@ -256,10 +264,15 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
         ]
         html: str | None = None
         for url in urls:
-            async with self.get(url) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    break
+            try:
+                # raise_for_status is session-level in curl_cffi (not a
+                # per-request option), so HTTP errors surface as exceptions
+                response = await self.get(url)
+            except CurlError:
+                continue
+            if response.status_code == 200:
+                html = response.text
+                break
         return html
 
     async def get_circle(self, maker_id: str) -> Circle:
@@ -274,7 +287,10 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
         Raises:
             DlsiteError: Failed to fetch circle information.
         """
-        html = await self._fetch_circle_html(maker_id)
+        try:
+            html = await self._fetch_circle_html(maker_id)
+        except CurlError as e:
+            raise DlsiteError(f"Failed to get circle {maker_id}") from e
         if not html:
             raise DlsiteError(f"Failed to get circle {maker_id}")
         info = parse_circle_html(html)
@@ -285,7 +301,7 @@ class DlsiteAPI(BaseAPI["DlsiteAPI"]):
         url = (
             f"https://www.dlsite.com/maniax/circle/profile/=/maker_id/{maker_id}.html/"
         )
-        async with self.get(url) as response:
-            if response.status == 200:
-                return await response.text()
+        response = await self.get(url)
+        if response.status_code == 200:
+            return response.text
         return None

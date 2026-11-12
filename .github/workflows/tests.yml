@@ -14,14 +14,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { python: "3.14", os: "ubuntu-latest", session: "pre-commit" }
-          - { python: "3.14", os: "ubuntu-latest", session: "mypy" }
+          - { python: "3.15", os: "ubuntu-latest", session: "pre-commit" }
+          - { python: "3.15", os: "ubuntu-latest", session: "mypy" }
+          - { python: "3.15", os: "ubuntu-latest", session: "tests" }
+          - { python: "3.15", os: "windows-latest", session: "tests" }
+          - { python: "3.15", os: "macos-latest", session: "tests" }
+          - { python: "3.15", os: "ubuntu-latest", session: "typeguard" }
+          - { python: "3.15", os: "ubuntu-latest", session: "xdoctest" }
+          - { python: "3.15", os: "ubuntu-latest", session: "docs-build" }
           - { python: "3.14", os: "ubuntu-latest", session: "tests" }
-          - { python: "3.14", os: "windows-latest", session: "tests" }
-          - { python: "3.14", os: "macos-latest", session: "tests" }
-          - { python: "3.14", os: "ubuntu-latest", session: "typeguard" }
-          - { python: "3.14", os: "ubuntu-latest", session: "xdoctest" }
-          - { python: "3.14", os: "ubuntu-latest", session: "docs-build" }
           - { python: "3.13", os: "ubuntu-latest", session: "tests" }
           - { python: "3.12", os: "ubuntu-latest", session: "tests" }
           - { python: "3.11", os: "ubuntu-latest", session: "tests" }
@@ -117,7 +118,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Upgrade pip
         run: |
@@ -149,7 +150,7 @@ jobs:
           nox --session=coverage -- xml
 
       - name: Upload coverage report
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
@@ -162,7 +163,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Upgrade pip
         run: |

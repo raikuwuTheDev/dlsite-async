@@ -39,8 +39,8 @@ async def main() -> None:
         # compare against what a real browser session holds after login,
         # without ever printing/logging the actual secret cookie values.
         print("Cookie jar after login (name @ domain):")
-        for cookie in api.session.cookie_jar:
-            print(f"  {cookie.key} @ {cookie['domain']}")
+        for cookie in api.session.cookies.jar:
+            print(f"  {cookie.name} @ {cookie.domain}")
 
         # Fetch the raw product-page HTML too, so we can check whether the
         # outline table / #right panel is actually populated once truly

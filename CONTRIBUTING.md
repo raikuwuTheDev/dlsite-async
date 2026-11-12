@@ -37,29 +37,25 @@ Request features on the [Issue Tracker].
 
 ## How to set up your development environment
 
-You need Python 3.8+ and the following tools:
+You need Python 3.11+ and the following tools:
 
-- [Poetry]
+- [PDM]
 - [Nox]
-- [nox-poetry]
 
 Install the package with development requirements:
 
 ```console
-$ poetry install --all-extras
+$ pdm install
 ```
 
-You can now run an interactive Python session,
-or the command-line interface:
+You can now run an interactive Python session via PDM
 
 ```console
-$ poetry run python
-$ poetry run dlsite-async
+$ pdm run python
 ```
 
-[poetry]: https://python-poetry.org/
+[pdm]: https://pdm-project.org/
 [nox]: https://nox.thea.codes/
-[nox-poetry]: https://nox-poetry.readthedocs.io/
 
 ## How to test the project
 
@@ -109,6 +105,15 @@ It is recommended to open an issue before starting work on anything.
 This will allow a chance to talk it over with the owners and validate your approach.
 
 [pull request]: https://github.com/bhrevol/dlsite-async/pulls
+
+## Strict No LLM / No AI Policy
+
+- No LLMs for issues.
+- No LLMs for patches / pull requests.
+- No LLMs for comments issues / PRs / discussions, including translation.
+
+English is encouraged, but not required.
+You are welcome to post in your native language and rely on others to have their own translation tools of choice to interpret your words.
 
 <!-- github-only -->
 
